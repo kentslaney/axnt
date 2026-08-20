@@ -9,7 +9,7 @@ Implicit state management for JAX functions, methods, and model pipelines.
 ## Installation
 
 ```bash
-pip install -e .
+pip install axnt
 ```
 
 ---
