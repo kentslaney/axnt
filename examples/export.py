@@ -11,7 +11,8 @@ from jax._src.interpreters import mlir as jax_mlir
 from jax import export
 import jax.numpy as jnp
 
-from axnt import implicit, restores, state_specs
+from axnt import implicit, restores
+
 
 try:
     import coremltools as ct
@@ -65,8 +66,9 @@ def export_demo():
     mil_program = convert(
         hlo_module,
         minimum_deployment_target=ct.target.iOS18,
-        states=exported.state_specs(StateSpec),
+        states=exported.cml_state_specs(StateSpec),
     )
+
     print("\nMIL Program:\n", mil_program)
 
     # 4. Convert MIL program to Core ML model

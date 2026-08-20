@@ -178,10 +178,11 @@ class Decorator:
             if not jnp.all(jnp.asarray(v) == 0)
         }
 
-    def state_specs(self, StateSpec=None, function_name=None, warn_non_zero=True):
+    def cml_state_specs(self, StateSpec=None, function_name=None, warn_non_zero=True):
         """Generate stablehlo-coreml states mapping without exposing argument numbers in userspace."""
         if StateSpec is None:
             from stablehlo_coreml import StateSpec
+
 
         if warn_non_zero:
             non_zero = self.check_non_zero_defaults()
@@ -311,9 +312,10 @@ def managed(arg=None):
     return decorator
 
 
-def state_specs(fn, StateSpec=None, function_name=None):
+def cml_state_specs(fn, StateSpec=None, function_name=None):
     """Generate stablehlo-coreml states mapping for an implicit function."""
-    if hasattr(fn, "state_specs"):
-        return fn.state_specs(StateSpec=StateSpec, function_name=function_name)
+    if hasattr(fn, "cml_state_specs"):
+        return fn.cml_state_specs(StateSpec=StateSpec, function_name=function_name)
     raise TypeError(f"{fn} is not an axnt @implicit function")
+
 

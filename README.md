@@ -113,7 +113,7 @@ In standard JAX pipelines, keeping track of state across deep model hierarchies 
 
 When exporting models to Apple Core ML via `stablehlo-coreml`, `axnt` automates state mapping without leaking low-level argument indices into userspace:
 - **`exported.initial_state` & `exported.defaults`**: Access declared default tensor initializations directly, without running a forward pass with dummy zeros.
-- **`exported.state_specs(StateSpec)` / `axnt.state_specs(exported)`**: Automatically constructs the `states` mapping for `stablehlo_coreml.convert`, matching each state variable to its output position.
+- **`exported.cml_state_specs(StateSpec)` / `axnt.cml_state_specs(exported)`**: Automatically constructs the `states` mapping for `stablehlo_coreml.convert`, matching each state variable to its output position.
 
 ```python
 from stablehlo_coreml import StateSpec, convert
@@ -121,9 +121,10 @@ from stablehlo_coreml import StateSpec, convert
 mil_program = convert(
     hlo_module,
     minimum_deployment_target=ct.target.iOS18,
-    states=exported.state_specs(StateSpec),
+    states=exported.cml_state_specs(StateSpec),
 )
 ```
+
 
 
 

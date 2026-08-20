@@ -5,7 +5,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from axnt import Context, Decorator, implicit, managed, restores
+from axnt import cml_state_specs, implicit, managed, restores
+
+
 
 
 class TestStatefulBasic(unittest.TestCase):
@@ -199,7 +201,7 @@ class TestStateSpecsAndDefaults(unittest.TestCase):
                 self.name = name
 
         # Flat dictionary mapping for single-function export
-        specs = step.state_specs(StateSpec=MockStateSpec)
+        specs = step.cml_state_specs(StateSpec=MockStateSpec)
         self.assertEqual(len(specs), 2)
         self.assertEqual(specs[0].name, "momentum")
         self.assertEqual(specs[0].output, 0)
@@ -207,13 +209,18 @@ class TestStateSpecsAndDefaults(unittest.TestCase):
         self.assertEqual(specs[1].output, 1)
 
         # Multi-function export with specified function name
-        named_specs = step.state_specs(StateSpec=MockStateSpec, function_name="main")
+        named_specs = step.cml_state_specs(StateSpec=MockStateSpec, function_name="main")
         self.assertIn("main", named_specs)
         self.assertEqual(named_specs["main"][0].name, "momentum")
+
+        # Top-level helper function
+        helper_specs = cml_state_specs(step, StateSpec=MockStateSpec)
+        self.assertEqual(len(helper_specs), 2)
 
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
