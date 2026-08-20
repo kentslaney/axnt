@@ -13,13 +13,14 @@ class Context:
     scope = None
 
     def __init__(self, name, state):
+        self.defaults = {}
         self.closure = {} if state is None else state
         self.name = name
 
     def __enter__(self):
         self.parent = __class__.scope
         if __class__.scope is not None:
-            self.locked = __class__.scope.locked
+            self.locked = set(__class__.scope.locked)
         else:
             self.locked = set()
         __class__.scope = self
@@ -40,6 +41,7 @@ class Context:
                 self.closure = self.closure._replace(**{key: value})
 
     def register(self, key, default):
+        self.defaults[key] = default
         return default
 
     @functools.cached_property
@@ -58,16 +60,19 @@ class Context:
         return self.closure._asdict()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        trace = jax.extend.core.find_top_trace(())
-        for k, v in self._asdict().items():
-            if isinstance(v, jax.core.Tracer):
-                if v._trace != trace:
-                    src = v._trace.frame.debug_info.func_src_info
-                    raise NameError(
-                        f"implicit '{k}' type {v} was produced by a trace "
-                        f"missing '{self.name}' for {src}"
-                    )
-        __class__.scope = self.parent
+        try:
+            if exc_type is None:
+                trace = jax.extend.core.find_top_trace(())
+                for k, v in self._asdict().items():
+                    if isinstance(v, jax.core.Tracer):
+                        if v._trace != trace:
+                            src = v._trace.frame.debug_info.func_src_info
+                            raise NameError(
+                                f"implicit '{k}' type {v} was produced by a trace "
+                                f"missing '{self.name}' for {src}"
+                            )
+        finally:
+            __class__.scope = self.parent
 
 
 def restores(**contained):
@@ -76,25 +81,31 @@ def restores(**contained):
         def wrapper(*a, **kw):
             assert Context.scope is not None, "missing boundary for implicits"
             namespace = f.__globals__
-            for k in contained:
-                assert k not in namespace
-                if k in Context.scope.locked:
-                    raise RuntimeError(
-                        f"The state '{k}' was already restored in this trace. "
-                        "Multiple restores cause branching side-effects in JAX."
+            restored_keys = []
+            try:
+                for k in contained:
+                    assert k not in namespace
+                    if k in Context.scope.locked:
+                        raise RuntimeError(
+                            f"The state '{k}' was already restored in this trace. "
+                            "Multiple restores cause branching side-effects in JAX."
+                        )
+                    Context.scope.locked.add(k)
+                    is_missing = not Context.scope.starting and not hasattr(Context.scope.closure, k)
+                    namespace[k] = (
+                        Context.scope.register(k, contained[k])
+                        if (Context.scope.starting or is_missing)
+                        else Context.scope[k]
                     )
-                Context.scope.locked.add(k)
-                is_missing = not Context.scope.starting and not hasattr(Context.scope.closure, k)
-                namespace[k] = (
-                    Context.scope.register(k, contained[k])
-                    if (Context.scope.starting or is_missing)
-                    else Context.scope[k]
-                )
-            result = f(*a, **kw)
-            for k in contained:
-                Context.scope[k] = namespace[k].astype(contained[k].dtype)
-                del namespace[k]
-            return result
+                    restored_keys.append(k)
+                result = f(*a, **kw)
+                for k in restored_keys:
+                    Context.scope[k] = namespace[k].astype(contained[k].dtype)
+                return result
+            finally:
+                for k in restored_keys:
+                    if k in namespace:
+                        del namespace[k]
 
         return wrapper
 
@@ -145,7 +156,36 @@ class Decorator:
             state, args = bound.arguments.pop(self.argname), bound.args
         with Context(self.argname, state) as scope:
             result = self.f(*args, **bound.kwargs)
+            if scope.defaults:
+                self.defaults = scope.defaults
             return result if scope is None else (scope.serializable, result)
+
+    @property
+    def initial_state(self):
+        """Construct the initial state namedtuple directly from declared default initializers."""
+        if hasattr(self, "defaults"):
+            return namedtuple(self.argname, self.defaults.keys())(**self.defaults)
+        return None
+
+    def state_specs(self, StateSpec=None, function_name=None):
+        """Generate stablehlo-coreml states mapping without exposing argument numbers in userspace."""
+        if StateSpec is None:
+            from stablehlo_coreml import StateSpec
+        init = self.initial_state
+        if init is None:
+            specs = {}
+        elif hasattr(init, "_fields"):
+            specs = {
+                i: StateSpec(output=i, name=name)
+                for i, name in enumerate(init._fields)
+            }
+        else:
+            specs = {0: StateSpec(output=0, name=self.argname)}
+
+        if function_name is not None:
+            return {function_name: specs}
+        return specs
+
 
 
 def implicit(argname):
@@ -205,6 +245,9 @@ def managed(arg=None):
             if branch is not None:
                 if scope.starting:
                     scope.closure[branch] = new_sub_state
+                    sub_defaults = getattr(f, "defaults", None)
+                    if sub_defaults is not None:
+                        scope.defaults[branch] = sub_defaults
                 else:
                     if hasattr(scope.closure, "_fields") and branch not in scope.closure._fields:
                         d = scope.closure._asdict()
@@ -218,6 +261,9 @@ def managed(arg=None):
                         scope.closure.update(new_sub_state._asdict())
                     elif isinstance(new_sub_state, dict):
                         scope.closure.update(new_sub_state)
+                    sub_defaults = getattr(f, "defaults", None)
+                    if isinstance(sub_defaults, dict):
+                        scope.defaults.update(sub_defaults)
                 else:
                     items = new_sub_state._asdict() if hasattr(new_sub_state, "_asdict") else new_sub_state
                     if hasattr(scope.closure, "_fields"):
@@ -236,3 +282,11 @@ def managed(arg=None):
         branch = None
         return decorator(f)
     return decorator
+
+
+def state_specs(fn, StateSpec=None, function_name=None):
+    """Generate stablehlo-coreml states mapping for an implicit function."""
+    if hasattr(fn, "state_specs"):
+        return fn.state_specs(StateSpec=StateSpec, function_name=function_name)
+    raise TypeError(f"{fn} is not an axnt @implicit function")
+

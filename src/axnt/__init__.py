@@ -6,6 +6,7 @@ from .stateful import (
     implicit,
     managed,
     restores,
+    state_specs,
 )
 
 __version__ = "0.1.0"
@@ -16,4 +17,5 @@ __all__ = [
     "implicit",
     "managed",
     "restores",
+    "state_specs",
 ]

@@ -10,7 +10,7 @@ from jax._src.interpreters import mlir as jax_mlir
 from jax import export
 import jax.numpy as jnp
 
-from axnt import implicit, restores
+from axnt import implicit, restores, state_specs
 
 try:
     import coremltools as ct
@@ -42,9 +42,11 @@ def exported(x):
 def export_demo():
     input_shapes = (jnp.zeros((), dtype=jnp.float32),)
 
-    # 1. Initialize initial state and deduce shapes
-    init_state, _ = exported(None, *input_shapes)
-    print("Initial State:", init_state)
+    # 1. Obtain the declared initial state defaults (without executing a step with zeros)
+    # Perform a trace initialization to capture declared default values
+    _ = jax.eval_shape(exported, None, *input_shapes)
+    init_state = exported.initial_state
+    print("Declared Initial State:", init_state)
 
     # 2. Export JAX function to StableHLO module
     # JAX exports (state, *inputs) -> (new_state, result)
@@ -58,17 +60,12 @@ def export_demo():
         print("  pip install stablehlo-coreml coremltools\n")
         return
 
-    # 3. Convert StableHLO to MIL with state mapping (stablehlo-coreml interface)
-    # Map state inputs (%arg0 -> momentum1, %arg1 -> momentum2) to their updated output indices (0, 1)
+    # 3. Convert StableHLO to MIL with state mapping generated automatically by axnt
+    # Argument numbers and indices are handled internally without leaking into userspace
     mil_program = convert(
         hlo_module,
         minimum_deployment_target=ct.target.iOS18,
-        states={
-            "main": {
-                0: StateSpec(output=0, name="momentum1"),
-                1: StateSpec(output=1, name="momentum2"),
-            },
-        },
+        states=exported.state_specs(StateSpec),
     )
     print("\nMIL Program:\n", mil_program)
 
@@ -83,9 +80,9 @@ def export_demo():
 
     # 5. Inference with in-place Core ML state
     state = cml_model.make_state()
-    # Write initial default state values
-    state.write_state("momentum1", float(init_state.momentum1))
-    state.write_state("momentum2", float(init_state.momentum2))
+    # Write the declared default initializations to the Core ML state
+    for k, v in exported.defaults.items():
+        state.write_state(k, float(v))
 
     y1 = cml_model.predict({"x": 2.0}, state=state)
     print("Step 1 Output:", y1, "Momentum1 state:", state.read_state("momentum1"))

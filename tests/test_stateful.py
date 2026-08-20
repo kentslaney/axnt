@@ -172,6 +172,48 @@ class TestStatefulErrors(unittest.TestCase):
         self.assertIn("already restored in this trace", str(ctx.exception))
 
 
+class TestStateSpecsAndDefaults(unittest.TestCase):
+    def test_defaults_and_initial_state(self):
+        @restores(momentum=jnp.ones((), dtype=jnp.float16), bias=jnp.zeros((), dtype=jnp.float32))
+        def block(x):
+            global momentum, bias
+            momentum += x
+            bias += 1.0
+            return momentum + bias
+
+        @implicit("state")
+        def step(x):
+            return block(x)
+
+        # Before any step or after dry shape eval, initial_state reflects declared defaults
+        _ = jax.eval_shape(step, None, jnp.zeros(()))
+        init = step.initial_state
+        self.assertIsNotNone(init)
+        np.testing.assert_allclose(float(init.momentum), 1.0)
+        np.testing.assert_allclose(float(init.bias), 0.0)
+
+        # Mock StateSpec for testing state_specs mapping
+        class MockStateSpec:
+            def __init__(self, output=None, name=None):
+                self.output = output
+                self.name = name
+
+        # Flat dictionary mapping for single-function export
+        specs = step.state_specs(StateSpec=MockStateSpec)
+        self.assertEqual(len(specs), 2)
+        self.assertEqual(specs[0].name, "momentum")
+        self.assertEqual(specs[0].output, 0)
+        self.assertEqual(specs[1].name, "bias")
+        self.assertEqual(specs[1].output, 1)
+
+        # Multi-function export with specified function name
+        named_specs = step.state_specs(StateSpec=MockStateSpec, function_name="main")
+        self.assertIn("main", named_specs)
+        self.assertEqual(named_specs["main"][0].name, "momentum")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
 
