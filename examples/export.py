@@ -55,6 +55,7 @@ if _COREML_AVAILABLE:
             return outputs
 
 
+    # TODO: support for multiple functions (process_block hook breaks and fn names)
     class StatefulIO(MilInjector):
         def __init__(self, *a, **kw):
             super().__init__(*a, **kw)
@@ -108,6 +109,11 @@ def export_demo():
     mil_program = converter.convert(hlo_module)
     print("MIL Program:\n", mil_program)
 
+    # TODO: rename StableHLO-generated arguments
+    # TODO: StateType doesn't support a default value
+    # PyTorch's register_buffer initialization is ignored and make_state gives zeros
+    # add/subtract on read/write and warn on non-zero offset to consider using
+    #   write_state
     print("External IO:", converter.external_io, "Defaults:", exported.defaults)
 
     register_optimizations()
