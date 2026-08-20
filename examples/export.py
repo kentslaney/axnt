@@ -1,9 +1,7 @@
-"""Experimental CoreML Export for Stateful Models using axnt.
+"""CoreML Export for Stateful Models using axnt and stablehlo-coreml.
 
-Note:
-    stablehlo-coreml interface for stateful models has changed in recent releases,
-    so this export script is preserved as a reference implementation for CoreML /
-    MIL stateful translation context.
+Demonstrates exporting an axnt stateful JAX model to Apple Core ML format
+using the `states` mapping and `StateSpec` interface supported by stablehlo-coreml.
 """
 
 import jax
@@ -16,11 +14,7 @@ from axnt import implicit, restores
 
 try:
     import coremltools as ct
-    from coremltools.converters.mil import Builder as mb
-    from stablehlo_coreml.ops_register import register_stablehlo_op
-    from stablehlo_coreml.converter import StableHloConverter, DEFAULT_HLO_PIPELINE, register_optimizations
-    from stablehlo_coreml.translation_context import TranslationContext
-    from jaxlib.mlir.dialects.stablehlo import CustomCallOp
+    from stablehlo_coreml import DEFAULT_HLO_PIPELINE, StateSpec, convert
     _COREML_AVAILABLE = True
 except ImportError:
     _COREML_AVAILABLE = False
@@ -45,85 +39,59 @@ def exported(x):
     return block1(x) + block2(x)
 
 
-if _COREML_AVAILABLE:
-    class MilInjector(StableHloConverter):
-        def process_block(self, context, block):
-            self.process_block = super().process_block
-            return list(self.patch(*super().process_block(context, block)))
-
-        def patch(self, *outputs):
-            return outputs
-
-
-    # TODO: support for multiple functions (process_block hook breaks and fn names)
-    class StatefulIO(MilInjector):
-        def __init__(self, *a, **kw):
-            super().__init__(*a, **kw)
-            self.internal_io = {}
-            self.external_io = {}
-
-        @register_stablehlo_op
-        def op_custom_call(self, context: TranslationContext, op: CustomCallOp):
-            call_target = op.call_target_name.value
-            if call_target == "ffi_read":
-                placeholder = op.inputs[0]
-                hlo_func = placeholder.owner.owner
-                with hlo_func.context:
-                    attrs = hlo_func.arg_attrs[placeholder.arg_number]
-                mapping = int(attrs['tf.aliasing_output'])
-                assert placeholder.arg_number == mapping
-                key = op.attributes["backend_config"].value
-                arg = placeholder.get_name()
-                state = context[arg]
-                self.internal_io[mapping] = state
-                self.external_io[key] = arg
-                context.add_result(op.result, mb.read_state(input=state))
-            else:
-                return super().op_custom_call(context, op)
-
-        def patch(self, *a):
-            for k, v in self.internal_io.items():
-                mb.coreml_update_state(state=v, value=a[k])
-            return [x for i, x in enumerate(a) if i not in self.internal_io]
-
-
 def export_demo():
+    input_shapes = (jnp.zeros((), dtype=jnp.float32),)
+
+    # 1. Initialize initial state and deduce shapes
+    init_state, _ = exported(None, *input_shapes)
+    print("Initial State:", init_state)
+
+    # 2. Export JAX function to StableHLO module
+    # JAX exports (state, *inputs) -> (new_state, result)
+    context = jax_mlir.make_ir_context()
+    jax_exported = export.export(jax.jit(exported))(init_state, *input_shapes)
+    hlo_module = ir.Module.parse(jax_exported.mlir_module(), context=context)
+    print("\nStableHLO Module:\n", hlo_module)
+
     if not _COREML_AVAILABLE:
-        print("stablehlo_coreml or coremltools not available in current environment.")
+        print("\nNote: Install `stablehlo-coreml` and `coremltools` to run Core ML conversion:")
+        print("  pip install stablehlo-coreml coremltools\n")
         return
 
-    context = jax_mlir.make_ir_context()
-    input_shapes = (jnp.zeros(()),)
-    state_shape = exported(..., *input_shapes)[0]
-    jax_exported = export.export(
-        jax.jit(exported, donate_argnames=["state"]),
-        disabled_checks=[
-            export.DisabledSafetyCheck.custom_call("ffi_read")
-        ],
-    )(state_shape, *input_shapes)
-    hlo_module = ir.Module.parse(jax_exported.mlir_module(), context=context)
+    # 3. Convert StableHLO to MIL with state mapping (stablehlo-coreml interface)
+    # Map state inputs (%arg0 -> momentum1, %arg1 -> momentum2) to their updated output indices (0, 1)
+    mil_program = convert(
+        hlo_module,
+        minimum_deployment_target=ct.target.iOS18,
+        states={
+            "main": {
+                0: StateSpec(output=0, name="momentum1"),
+                1: StateSpec(output=1, name="momentum2"),
+            },
+        },
+    )
+    print("\nMIL Program:\n", mil_program)
 
-    print("StableHLO Module:\n", hlo_module)
-
-    converter = StatefulIO(opset_version=ct.target.iOS18)
-    mil_program = converter.convert(hlo_module)
-    print("MIL Program:\n", mil_program)
-
-    # TODO: rename StableHLO-generated arguments
-    # TODO: StateType doesn't support a default value
-    # PyTorch's register_buffer initialization is ignored and make_state gives zeros
-    # add/subtract on read/write and warn on non-zero offset to consider using
-    #   write_state
-    print("External IO:", converter.external_io, "Defaults:", exported.defaults)
-
-    register_optimizations()
+    # 4. Convert MIL program to Core ML model
     cml_model = ct.convert(
         mil_program,
         source="milinternal",
         minimum_deployment_target=ct.target.iOS18,
         pass_pipeline=DEFAULT_HLO_PIPELINE,
     )
-    print("CoreML Model:\n", cml_model)
+    print("\nCore ML Model:\n", cml_model)
+
+    # 5. Inference with in-place Core ML state
+    state = cml_model.make_state()
+    # Write initial default state values
+    state.write_state("momentum1", float(init_state.momentum1))
+    state.write_state("momentum2", float(init_state.momentum2))
+
+    y1 = cml_model.predict({"x": 2.0}, state=state)
+    print("Step 1 Output:", y1, "Momentum1 state:", state.read_state("momentum1"))
+
+    y2 = cml_model.predict({"x": 3.0}, state=state)
+    print("Step 2 Output:", y2, "Momentum1 state:", state.read_state("momentum1"))
 
 
 if __name__ == "__main__":

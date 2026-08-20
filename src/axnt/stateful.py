@@ -11,36 +11,10 @@ jax.tree_util.register_static(type(Ellipsis))
 
 class Context:
     scope = None
-    external = None
 
     def __init__(self, name, state):
-        assert name != "ffi"
-        if state is Ellipsis and __class__.scope is None:
-            state, self.external = None, {}
-        if type(state).__name__ == "ffi":
-            self.external = ...
-
         self.closure = {} if state is None else state
         self.name = name
-
-    def read(self, key, shape):
-        from jax._src.interpreters import mlir
-
-        read = jax.extend.core.Primitive("stateful_intake")
-        read.multiple_results = False
-        read.def_abstract_eval(lambda _: shape)
-
-        @functools.partial(mlir.register_lowering, read)
-        def _lowering(ctx, ref):
-            ir_types = mlir.aval_to_ir_types(ctx.module_context, shape)
-            return mlir.custom_call(
-                "ffi_read",
-                operands=[ref],
-                result_types=ir_types,
-                backend_config=key,
-            ).results
-
-        return read
 
     def __enter__(self):
         self.parent = __class__.scope
@@ -52,10 +26,7 @@ class Context:
         return self
 
     def __getitem__(self, key):
-        res = self.closure[key] if self.starting else getattr(self.closure, key)
-        if self.external is not Ellipsis:
-            return res
-        return self.read(key, jax.typeof(res)).bind(res)
+        return self.closure[key] if self.starting else getattr(self.closure, key)
 
     def __setitem__(self, key, value):
         if self.starting:
@@ -69,9 +40,6 @@ class Context:
                 self.closure = self.closure._replace(**{key: value})
 
     def register(self, key, default):
-        assert self.external is not Ellipsis
-        if self.external is not None:
-            self.external[key] = default
         return default
 
     @functools.cached_property
@@ -81,10 +49,7 @@ class Context:
     @property
     def serializable(self):
         if self.starting:
-            return namedtuple(
-                self.name if self.external is None else "ffi",
-                self.closure.keys(),
-            )(**self.closure)
+            return namedtuple(self.name, self.closure.keys())(**self.closure)
         return self.closure
 
     def _asdict(self):
@@ -93,16 +58,15 @@ class Context:
         return self.closure._asdict()
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.closure is not Ellipsis:
-            trace = jax.extend.core.find_top_trace(())
-            for k, v in self._asdict().items():
-                if isinstance(v, jax.core.Tracer):
-                    if v._trace != trace:
-                        src = v._trace.frame.debug_info.func_src_info
-                        raise NameError(
-                            f"implicit '{k}' type {v} was produced by a trace "
-                            f"missing '{self.name}' for {src}"
-                        )
+        trace = jax.extend.core.find_top_trace(())
+        for k, v in self._asdict().items():
+            if isinstance(v, jax.core.Tracer):
+                if v._trace != trace:
+                    src = v._trace.frame.debug_info.func_src_info
+                    raise NameError(
+                        f"implicit '{k}' type {v} was produced by a trace "
+                        f"missing '{self.name}' for {src}"
+                    )
         __class__.scope = self.parent
 
 
@@ -181,8 +145,6 @@ class Decorator:
             state, args = bound.arguments.pop(self.argname), bound.args
         with Context(self.argname, state) as scope:
             result = self.f(*args, **bound.kwargs)
-            if isinstance(scope.external, dict):
-                self.defaults = scope.external
             return result if scope is None else (scope.serializable, result)
 
 
@@ -213,17 +175,17 @@ def managed(arg=None):
                 return f(*a, **kw)
 
             if branch is not None:
-                if scope.starting:
-                    sub_state = scope.closure.get(branch, None)
-                    if sub_state is None and scope.external is not None:
-                        sub_state = ... if scope.external is ... else None
-                else:
-                    sub_state = getattr(scope.closure, branch, None)
+                sub_state = (
+                    scope.closure.get(branch, None)
+                    if scope.starting
+                    else getattr(scope.closure, branch, None)
+                )
             else:
-                if scope.starting:
-                    sub_state = ... if scope.external is ... else (scope.closure if scope.closure else None)
-                else:
-                    sub_state = scope.closure
+                sub_state = (
+                    (scope.closure if scope.closure else None)
+                    if scope.starting
+                    else scope.closure
+                )
 
             if len(a) > 0 and a[0] is Ellipsis:
                 new_a = (sub_state,) + a[1:]
@@ -243,14 +205,6 @@ def managed(arg=None):
             if branch is not None:
                 if scope.starting:
                     scope.closure[branch] = new_sub_state
-                    if isinstance(scope.external, dict):
-                        sub_defaults = getattr(f, "defaults", None)
-                        if sub_defaults is not None:
-                            scope.external[branch] = sub_defaults
-                        elif hasattr(new_sub_state, "_asdict"):
-                            scope.external[branch] = new_sub_state._asdict()
-                        elif isinstance(new_sub_state, dict):
-                            scope.external[branch] = new_sub_state
                 else:
                     if hasattr(scope.closure, "_fields") and branch not in scope.closure._fields:
                         d = scope.closure._asdict()
@@ -264,14 +218,6 @@ def managed(arg=None):
                         scope.closure.update(new_sub_state._asdict())
                     elif isinstance(new_sub_state, dict):
                         scope.closure.update(new_sub_state)
-                    if isinstance(scope.external, dict):
-                        sub_defaults = getattr(f, "defaults", None)
-                        if isinstance(sub_defaults, dict):
-                            scope.external.update(sub_defaults)
-                        elif hasattr(new_sub_state, "_asdict"):
-                            scope.external.update(new_sub_state._asdict())
-                        elif isinstance(new_sub_state, dict):
-                            scope.external.update(new_sub_state)
                 else:
                     items = new_sub_state._asdict() if hasattr(new_sub_state, "_asdict") else new_sub_state
                     if hasattr(scope.closure, "_fields"):
