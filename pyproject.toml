@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "axnt"
-version = "1.0.0"
+version = "1.0.1"
 description = "Implicit state management for JAX functions and models"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "CC0" }
 
-dependencies = ["jax>=0.9.0", "jaxlib>=0.9.0"]
+dependencies = ["jax>=0.10.0", "jaxlib>=0.10.0"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
-export = ["coremltools>=8.0"]
+export = ["coremltools>=8.0", "stablehlo-coreml>=0.1.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
