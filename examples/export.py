@@ -16,7 +16,7 @@ from axnt import implicit, restores
 
 try:
     import coremltools as ct
-    from stablehlo_coreml import DEFAULT_HLO_PIPELINE, StateSpec, convert
+    from stablehlo_coreml import DEFAULT_HLO_PIPELINE, convert
     _COREML_AVAILABLE = True
 except ImportError:
     _COREML_AVAILABLE = False
@@ -55,7 +55,6 @@ def export_demo():
     hlo_module = ir.Module.parse(jax_exported.mlir_module(), context=context)
     print("\nStableHLO Module:\n", hlo_module)
 
-
     if not _COREML_AVAILABLE:
         print("\nNote: Install `stablehlo-coreml` and `coremltools` to run Core ML conversion:")
         print("  pip install stablehlo-coreml coremltools\n")
@@ -66,8 +65,9 @@ def export_demo():
     mil_program = convert(
         hlo_module,
         minimum_deployment_target=ct.target.iOS18,
-        states=exported.cml_state_specs(StateSpec),
+        states=exported.cml_state_specs(),
     )
+
 
     print("\nMIL Program:\n", mil_program)
 

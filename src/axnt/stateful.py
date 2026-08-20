@@ -312,10 +312,4 @@ def managed(arg=None):
     return decorator
 
 
-def cml_state_specs(fn, StateSpec=None, function_name=None):
-    """Generate stablehlo-coreml states mapping for an implicit function."""
-    if hasattr(fn, "cml_state_specs"):
-        return fn.cml_state_specs(StateSpec=StateSpec, function_name=function_name)
-    raise TypeError(f"{fn} is not an axnt @implicit function")
-
 

@@ -5,7 +5,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from axnt import cml_state_specs, implicit, managed, restores
+from axnt import implicit, managed, restores
+
 
 
 
@@ -213,13 +214,10 @@ class TestStateSpecsAndDefaults(unittest.TestCase):
         self.assertIn("main", named_specs)
         self.assertEqual(named_specs["main"][0].name, "momentum")
 
-        # Top-level helper function
-        helper_specs = cml_state_specs(step, StateSpec=MockStateSpec)
-        self.assertEqual(len(helper_specs), 2)
-
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
