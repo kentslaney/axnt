@@ -5,8 +5,10 @@ from types import MethodType
 
 import jax
 import jax.extend.core
+import jax.numpy as jnp
 
 jax.tree_util.register_static(type(Ellipsis))
+
 
 
 class Context:
@@ -167,10 +169,34 @@ class Decorator:
             return namedtuple(self.argname, self.defaults.keys())(**self.defaults)
         return None
 
-    def state_specs(self, StateSpec=None, function_name=None):
+    def check_non_zero_defaults(self):
+        """Check and return any state keys that have non-zero default initializations."""
+        if not hasattr(self, "defaults"):
+            return {}
+        return {
+            k: v for k, v in self.defaults.items()
+            if not jnp.all(jnp.asarray(v) == 0)
+        }
+
+    def state_specs(self, StateSpec=None, function_name=None, warn_non_zero=True):
         """Generate stablehlo-coreml states mapping without exposing argument numbers in userspace."""
         if StateSpec is None:
             from stablehlo_coreml import StateSpec
+
+        if warn_non_zero:
+            non_zero = self.check_non_zero_defaults()
+            if non_zero:
+                import warnings
+
+                warnings.warn(
+                    f"Non-zero state defaults detected for keys: {list(non_zero.keys())}. "
+                    "Core ML allocates state tensors to zero by default via `make_state()`. "
+                    "Ensure non-zero defaults are written with `state.write_state(key, val)` "
+                    "prior to inference.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
         init = self.initial_state
         if init is None:
             specs = {}
@@ -185,6 +211,7 @@ class Decorator:
         if function_name is not None:
             return {function_name: specs}
         return specs
+
 
 
 

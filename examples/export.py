@@ -4,6 +4,7 @@ Demonstrates exporting an axnt stateful JAX model to Apple Core ML format
 using the `states` mapping and `StateSpec` interface supported by stablehlo-coreml.
 """
 
+import warnings
 import jax
 from jax._src.lib.mlir import ir
 from jax._src.interpreters import mlir as jax_mlir
@@ -42,18 +43,17 @@ def exported(x):
 def export_demo():
     input_shapes = (jnp.zeros((), dtype=jnp.float32),)
 
-    # 1. Obtain the declared initial state defaults (without executing a step with zeros)
-    # Perform a trace initialization to capture declared default values
-    _ = jax.eval_shape(exported, None, *input_shapes)
-    init_state = exported.initial_state
-    print("Declared Initial State:", init_state)
+    # 1. Obtain state shape from the state structure after the first call
+    state_shape, _ = jax.eval_shape(exported, None, *input_shapes)
+    print("State Shape after first call:", state_shape)
 
     # 2. Export JAX function to StableHLO module
     # JAX exports (state, *inputs) -> (new_state, result)
     context = jax_mlir.make_ir_context()
-    jax_exported = export.export(jax.jit(exported))(init_state, *input_shapes)
+    jax_exported = export.export(jax.jit(exported))(state_shape, *input_shapes)
     hlo_module = ir.Module.parse(jax_exported.mlir_module(), context=context)
     print("\nStableHLO Module:\n", hlo_module)
+
 
     if not _COREML_AVAILABLE:
         print("\nNote: Install `stablehlo-coreml` and `coremltools` to run Core ML conversion:")
@@ -80,9 +80,10 @@ def export_demo():
 
     # 5. Inference with in-place Core ML state
     state = cml_model.make_state()
-    # Write the declared default initializations to the Core ML state
-    for k, v in exported.defaults.items():
+    # Write any non-zero initial values to the Core ML state
+    for k, v in exported.check_non_zero_defaults().items():
         state.write_state(k, float(v))
+
 
     y1 = cml_model.predict({"x": 2.0}, state=state)
     print("Step 1 Output:", y1, "Momentum1 state:", state.read_state("momentum1"))
