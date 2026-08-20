@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "axnt"
+version = "0.1.0"
+description = "Implicit state management for JAX functions and models"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "jax>=0.4.0",
+    "jaxlib>=0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+export = [
+    "coremltools>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
