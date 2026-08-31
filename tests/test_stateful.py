@@ -215,6 +215,124 @@ class TestStateSpecsAndDefaults(unittest.TestCase):
         self.assertEqual(named_specs["main"][0].name, "momentum")
 
 
+class TestBranchStateSpecs(unittest.TestCase):
+    """State declared through `@managed("branch")` has to export like it runs."""
+
+    @staticmethod
+    def leaf_paths(tree):
+        paths, _ = jax.tree_util.tree_flatten_with_path(tree)
+        return [jax.tree_util.keystr(path) for path, _ in paths]
+
+    @staticmethod
+    def pipeline():
+        @restores(nested1=jnp.ones(()))
+        def inner1(x):
+            global nested1
+            nested1 += x
+            return nested1
+
+        @restores(nested2=jnp.zeros(()))
+        def inner2(x):
+            global nested2
+            nested2 += x
+            return nested2
+
+        @restores(merged=jnp.zeros(()))
+        def sibling(x):
+            global merged
+            merged += x
+            return merged
+
+        # `@managed` outside `@jax.jit` is the documented composition order, and
+        # the branch holds more than one key so field and leaf counts differ.
+        @managed("branch")
+        @jax.jit
+        @implicit
+        def sub(x):
+            return inner1(x) + inner2(x)
+
+        @implicit
+        def root(x):
+            return sub(..., x) + sibling(x)
+
+        return root
+
+    def test_defaults_reach_through_jit(self):
+        root = self.pipeline()
+        state, _ = root(None, 1.0)
+
+        # `@managed` sees a PjitFunction, not the Decorator holding `defaults`;
+        # reading only the outermost object contributes nothing and the specs
+        # come back empty with no error.
+        init = root.initial_state
+        self.assertIsNotNone(init)
+        self.assertIn("branch", init._fields)
+        self.assertEqual(len(root.state_leaves()), 3)
+
+    def test_initial_state_matches_running_state(self):
+        root = self.pipeline()
+        state, _ = root(None, 1.0)
+
+        # Same leaves in the same order, or the spec numbering below describes
+        # a state layout the traced function does not produce.
+        self.assertEqual(
+            self.leaf_paths(root.initial_state), self.leaf_paths(state)
+        )
+        self.assertEqual(
+            self.leaf_paths(state), [".branch.nested1", ".branch.nested2", ".merged"]
+        )
+
+    def test_specs_numbered_by_leaf_not_field(self):
+        class MockStateSpec:
+            def __init__(self, output=None, name=None):
+                self.output = output
+                self.name = name
+
+        root = self.pipeline()
+        _ = root(None, 1.0)
+
+        # Two top-level fields over three leaves: numbering by field would bind
+        # "merged" to output 1, which is really the branch's second key.
+        self.assertEqual(len(root.initial_state._fields), 2)
+        specs = root.cml_state_specs(StateSpec=MockStateSpec, warn_non_zero=False)
+        self.assertEqual(
+            [(specs[i].output, specs[i].name) for i in sorted(specs)],
+            [(0, "nested1"), (1, "nested2"), (2, "merged")],
+        )
+
+    def test_check_non_zero_defaults_flattens_branches(self):
+        root = self.pipeline()
+        _ = root(None, 1.0)
+
+        # A branch contributes a mapping rather than an array; calling
+        # jnp.asarray on it raises, and cml_state_specs does so by default.
+        non_zero = root.check_non_zero_defaults()
+        self.assertEqual(set(non_zero), {"nested1"})
+        np.testing.assert_allclose(float(non_zero["nested1"]), 1.0)
+
+    def test_flat_managed_unchanged(self):
+        @restores(only=jnp.ones(()))
+        def block(x):
+            global only
+            only += x
+            return only
+
+        @managed
+        @jax.jit
+        @implicit
+        def child(x):
+            return block(x)
+
+        @implicit
+        def root(x):
+            return child(..., x)
+
+        state, _ = root(None, 1.0)
+        self.assertEqual(self.leaf_paths(root.initial_state), [".only"])
+        self.assertEqual(self.leaf_paths(state), [".only"])
+        self.assertEqual([n for n, _ in root.state_leaves()], ["only"])
+
+
 if __name__ == "__main__":
     unittest.main()
 

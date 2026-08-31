@@ -77,6 +77,32 @@ class Context:
             __class__.scope = self.parent
 
 
+def _unwrap_defaults(f):
+    """Reach a callable's declared defaults through jit and other wrappers.
+
+    `@managed` sits outside `@jax.jit`, so the child it holds is a
+    `PjitFunction` rather than the `Decorator` that owns `defaults`. Walk the
+    `__wrapped__` chain instead of reading only the outermost object, which
+    would silently contribute no defaults at all.
+    """
+    seen = set()
+    while f is not None and id(f) not in seen:
+        seen.add(id(f))
+        defaults = getattr(f, "defaults", None)
+        if isinstance(defaults, dict):
+            return defaults
+        f = getattr(f, "__wrapped__", None)
+    return None
+
+
+def _leaf_name(key):
+    """Name of a single pytree path entry, whatever key type produced it."""
+    for attr in ("name", "key", "idx"):
+        if hasattr(key, attr):
+            return str(getattr(key, attr))
+    return str(key)
+
+
 def restores(**contained):
     def decorator(f):
         @functools.wraps(f)
@@ -162,20 +188,45 @@ class Decorator:
                 self.defaults = scope.defaults
             return result if scope is None else (scope.serializable, result)
 
+    @staticmethod
+    def _nest(name, mapping):
+        """Build a namedtuple from a defaults mapping, recursing into branches.
+
+        `@managed("branch")` contributes the child's defaults as a nested
+        mapping, and the running state holds a namedtuple in that position, so
+        the declared state has to nest the same way or its leaves will not line
+        up with the ones the traced function returns.
+        """
+        fields = {
+            k: Decorator._nest(k, v) if isinstance(v, dict) else v
+            for k, v in mapping.items()
+        }
+        return namedtuple(name, fields.keys())(**fields)
+
     @property
     def initial_state(self):
         """Construct the initial state namedtuple directly from declared default initializers."""
         if hasattr(self, "defaults"):
-            return namedtuple(self.argname, self.defaults.keys())(**self.defaults)
+            return self._nest(self.argname, self.defaults)
         return None
+
+    def state_leaves(self):
+        """Declared state as (name, default) per exported output, in leaf order.
+
+        `jax.export` emits one output per pytree leaf, so this — not the
+        top-level fields — is the numbering Core ML states have to match.
+        """
+        init = self.initial_state
+        if init is None:
+            return []
+        paths, _ = jax.tree_util.tree_flatten_with_path(init)
+        return [(_leaf_name(path[-1]), leaf) for path, leaf in paths]
 
     def check_non_zero_defaults(self):
         """Check and return any state keys that have non-zero default initializations."""
-        if not hasattr(self, "defaults"):
-            return {}
         return {
-            k: v for k, v in self.defaults.items()
-            if not jnp.all(jnp.asarray(v) == 0)
+            name: default for name, default in self.state_leaves()
+            if not jnp.all(jnp.asarray(default) == 0)
         }
 
     def cml_state_specs(self, StateSpec=None, function_name=None, warn_non_zero=True):
@@ -198,16 +249,10 @@ class Decorator:
                     stacklevel=2,
                 )
 
-        init = self.initial_state
-        if init is None:
-            specs = {}
-        elif hasattr(init, "_fields"):
-            specs = {
-                i: StateSpec(output=i, name=name)
-                for i, name in enumerate(init._fields)
-            }
-        else:
-            specs = {0: StateSpec(output=0, name=self.argname)}
+        specs = {
+            i: StateSpec(output=i, name=name)
+            for i, (name, _) in enumerate(self.state_leaves())
+        }
 
         if function_name is not None:
             return {function_name: specs}
@@ -273,7 +318,7 @@ def managed(arg=None):
             if branch is not None:
                 if scope.starting:
                     scope.closure[branch] = new_sub_state
-                    sub_defaults = getattr(f, "defaults", None)
+                    sub_defaults = _unwrap_defaults(f)
                     if sub_defaults is not None:
                         scope.defaults[branch] = sub_defaults
                 else:
@@ -289,7 +334,7 @@ def managed(arg=None):
                         scope.closure.update(new_sub_state._asdict())
                     elif isinstance(new_sub_state, dict):
                         scope.closure.update(new_sub_state)
-                    sub_defaults = getattr(f, "defaults", None)
+                    sub_defaults = _unwrap_defaults(f)
                     if isinstance(sub_defaults, dict):
                         scope.defaults.update(sub_defaults)
                 else:
