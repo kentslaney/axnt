@@ -16,7 +16,12 @@ from axnt import implicit, restores
 
 try:
     import coremltools as ct
-    from stablehlo_coreml import DEFAULT_HLO_PIPELINE, convert
+    from stablehlo_coreml import convert
+    try:  # renamed in stablehlo-coreml 0.1.6
+        from stablehlo_coreml import DEFAULT_HLO_PIPELINE as HLO_PIPELINE
+    except ImportError:
+        from stablehlo_coreml import build_pass_pipeline
+        HLO_PIPELINE = build_pass_pipeline()
     _COREML_AVAILABLE = True
 except ImportError:
     _COREML_AVAILABLE = False
@@ -51,7 +56,12 @@ def export_demo():
     # 2. Export JAX function to StableHLO module
     # JAX exports (state, *inputs) -> (new_state, result)
     context = jax_mlir.make_ir_context()
-    jax_exported = export.export(jax.jit(exported))(state_shape, *input_shapes)
+    # keep_unused=True is required, not stylistic: a state written without
+    # being read is a dead argument, and jit drops it from the lowered inputs
+    # while in_avals still reports it, so the state inputs stop lining up with
+    # the outputs cml_state_specs() numbers.
+    jax_exported = export.export(jax.jit(exported, keep_unused=True))(
+        state_shape, *input_shapes)
     hlo_module = ir.Module.parse(jax_exported.mlir_module(), context=context)
     print("\nStableHLO Module:\n", hlo_module)
 
@@ -76,7 +86,7 @@ def export_demo():
         mil_program,
         source="milinternal",
         minimum_deployment_target=ct.target.iOS18,
-        pass_pipeline=DEFAULT_HLO_PIPELINE,
+        pass_pipeline=HLO_PIPELINE,
     )
     print("\nCore ML Model:\n", cml_model)
 

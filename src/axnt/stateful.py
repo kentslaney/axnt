@@ -77,21 +77,44 @@ class Context:
             __class__.scope = self.parent
 
 
-def _unwrap_defaults(f):
-    """Reach a callable's declared defaults through jit and other wrappers.
+def _walk_wrapped(f):
+    """Yield a callable and everything it wraps, via `__wrapped__`.
 
-    `@managed` sits outside `@jax.jit`, so the child it holds is a
-    `PjitFunction` rather than the `Decorator` that owns `defaults`. Walk the
-    `__wrapped__` chain instead of reading only the outermost object, which
-    would silently contribute no defaults at all.
+    `functools.wraps` sets `__wrapped__`, and `jax.jit` exposes it too, so this
+    reaches the `Decorator` under a stack of transformations. Wrappers do not
+    forward attribute access, so reading only the outermost object silently
+    finds nothing.
     """
     seen = set()
     while f is not None and id(f) not in seen:
         seen.add(id(f))
-        defaults = getattr(f, "defaults", None)
+        yield f
+        f = getattr(f, "__wrapped__", None)
+
+
+def unwrap(fn):
+    """Return the `@implicit` boundary behind a wrapped callable.
+
+    `@jax.jit` returns a `PjitFunction`, so `jitted.initial_state` raises
+    `AttributeError` even though the state it describes is right there.
+    `unwrap(jitted).initial_state` reaches it.
+    """
+    for f in _walk_wrapped(fn):
+        if isinstance(f, Decorator):
+            return f
+    raise TypeError(f"{fn!r} is not an axnt @implicit function")
+
+
+def _unwrap_defaults(f):
+    """Reach a callable's declared defaults through jit and other wrappers.
+
+    `@managed` sits outside `@jax.jit`, so the child it holds is a
+    `PjitFunction` rather than the `Decorator` that owns `defaults`.
+    """
+    for wrapped in _walk_wrapped(f):
+        defaults = getattr(wrapped, "defaults", None)
         if isinstance(defaults, dict):
             return defaults
-        f = getattr(f, "__wrapped__", None)
     return None
 
 
@@ -222,6 +245,18 @@ class Decorator:
         paths, _ = jax.tree_util.tree_flatten_with_path(init)
         return [(_leaf_name(path[-1]), leaf) for path, leaf in paths]
 
+    def check_non_float_defaults(self):
+        """State keys whose declared dtype Core ML cannot hold.
+
+        Core ML states are floating point; an integer state is rejected at
+        conversion, so counters and cursors have to be stored as floats.
+        """
+        return {
+            name: jnp.asarray(default).dtype
+            for name, default in self.state_leaves()
+            if not jnp.issubdtype(jnp.asarray(default).dtype, jnp.floating)
+        }
+
     def check_non_zero_defaults(self):
         """Check and return any state keys that have non-zero default initializations."""
         return {
@@ -245,6 +280,19 @@ class Decorator:
                     "Core ML allocates state tensors to zero by default via `make_state()`. "
                     "Ensure non-zero defaults are written with `state.write_state(key, val)` "
                     "prior to inference.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            non_float = self.check_non_float_defaults()
+            if non_float:
+                import warnings
+
+                warnings.warn(
+                    f"Non-floating-point state defaults detected: "
+                    f"{ {k: str(v) for k, v in non_float.items()} }. "
+                    "Core ML states must be floating point and conversion will "
+                    "reject these; store counters and cursors as floats.",
                     UserWarning,
                     stacklevel=2,
                 )

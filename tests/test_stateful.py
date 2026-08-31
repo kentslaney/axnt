@@ -5,7 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from axnt import implicit, managed, restores
+from axnt import implicit, managed, restores, unwrap
 
 
 
@@ -331,6 +331,98 @@ class TestBranchStateSpecs(unittest.TestCase):
         self.assertEqual(self.leaf_paths(root.initial_state), [".only"])
         self.assertEqual(self.leaf_paths(state), [".only"])
         self.assertEqual([n for n, _ in root.state_leaves()], ["only"])
+
+
+class TestExportBoundary(unittest.TestCase):
+    """Constraints that only show up on the way to Core ML."""
+
+    def test_unwrap_reaches_the_boundary_through_jit(self):
+        @restores(carried=jnp.ones(()))
+        def block(x):
+            global carried
+            carried += x
+            return carried
+
+        @jax.jit
+        @implicit
+        def step(x):
+            return block(x)
+
+        state, _ = step(None, 1.0)
+
+        # `@jax.jit` returns a PjitFunction, which forwards neither attribute
+        # access nor the state accessors behind it.
+        self.assertFalse(hasattr(step, "initial_state"))
+        boundary = unwrap(step)
+        self.assertIsNotNone(boundary.initial_state)
+        self.assertEqual([n for n, _ in boundary.state_leaves()], ["carried"])
+
+        with self.assertRaises(TypeError):
+            unwrap(lambda x: x)
+
+    def test_non_float_state_warns(self):
+        @restores(cursor=jnp.zeros((), dtype=jnp.int32), value=jnp.zeros(()))
+        def block(x):
+            global cursor, value
+            cursor = cursor + 1
+            value = value + x
+            return value
+
+        @implicit
+        def step(x):
+            return block(x)
+
+        _ = jax.eval_shape(step, None, jnp.zeros(()))
+
+        # Core ML states are floating point; an int32 state is rejected at
+        # conversion, so it is worth saying so before the conversion runs.
+        self.assertEqual(set(step.check_non_float_defaults()), {"cursor"})
+        with self.assertWarns(UserWarning) as caught:
+            step.cml_state_specs(StateSpec=lambda output, name: (output, name))
+        self.assertTrue(
+            any("floating point" in str(w.message) for w in caught.warnings)
+        )
+
+    def test_written_but_unread_state_needs_keep_unused(self):
+        from jax import export
+        from jax._src.interpreters import mlir as jax_mlir
+        from jax._src.lib.mlir import ir
+
+        @restores(read_and_written=jnp.zeros((4, 2)), written_only=jnp.zeros((3, 2)))
+        def block(x):
+            global read_and_written, written_only
+            written_only = x + jnp.zeros((3, 2))       # never read: dead argument
+            read_and_written = read_and_written + 1.0
+            return jnp.sum(read_and_written)
+
+        @implicit
+        def step(x):
+            return block(x)
+
+        shape, _ = jax.eval_shape(step, None, jnp.zeros(()))
+
+        def hlo_arity(keep_unused):
+            exported = export.export(jax.jit(step, keep_unused=keep_unused))(
+                shape, jnp.zeros(())
+            )
+            module = ir.Module.parse(
+                exported.mlir_module(), context=jax_mlir.make_ir_context()
+            )
+            op = next(
+                o for o in module.body.operations
+                if "main" in str(getattr(o, "name", ""))
+            )
+            return len(op.body.blocks[0].arguments), len(exported.in_avals)
+
+        # Without keep_unused, jit drops the dead state input from the lowered
+        # signature while in_avals still reports it, so the state inputs stop
+        # lining up with the outputs cml_state_specs numbers.
+        dropped, declared = hlo_arity(False)
+        self.assertEqual(declared, 3)
+        self.assertEqual(dropped, 2)
+
+        kept, declared = hlo_arity(True)
+        self.assertEqual(kept, declared)
 
 
 if __name__ == "__main__":

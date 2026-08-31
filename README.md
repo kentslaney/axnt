@@ -113,7 +113,9 @@ In standard JAX pipelines, keeping track of state across deep model hierarchies 
 
 When exporting models to Apple Core ML via `stablehlo-coreml`, `axnt` automates state mapping without leaking low-level argument indices into userspace:
 - **`exported.initial_state` & `exported.defaults`**: Access declared default tensor initializations directly, without running a forward pass with dummy zeros.
+- **`exported.state_leaves()`**: Declared state as `(name, default)` per exported output, in leaf order. `jax.export` emits one output per pytree leaf, so this — not the top-level fields — is the numbering Core ML states bind to, and a `@managed("branch")` subtree is flattened here.
 - **`exported.cml_state_specs()`**: Automatically constructs the `states` mapping for `stablehlo_coreml.convert`, matching each state variable to its output position.
+- **`unwrap(fn)`**: Reaches the `@implicit` boundary through `@jax.jit` and other wrappers. A `PjitFunction` forwards neither attribute access nor the state accessors, so `jitted.initial_state` raises `AttributeError`; `unwrap(jitted).initial_state` does not.
 
 
 ```python
@@ -125,6 +127,23 @@ mil_program = convert(
     states=exported.cml_state_specs(),
 )
 ```
+
+Two constraints Core ML imposes on the state itself:
+
+- **Export with `jax.jit(fn, keep_unused=True)`.** A state variable that is
+  written without being read is a dead argument, and jit drops it from the
+  lowered inputs while `in_avals` still reports it. The state inputs then no
+  longer line up with the outputs `cml_state_specs()` names — silently, if the
+  shapes happen to agree.
+- **States must be floating point.** An integer state is rejected at
+  conversion, so counters and cursors have to be stored as floats.
+  `check_non_float_defaults()` reports them, and `cml_state_specs()` warns.
+
+Several `@implicit` entry points can share one state — useful for exporting
+separate functions that run at different rates against the same tensors. Each
+restores only what it uses and passes the rest through, so build the canonical
+state from whichever function restores everything and take the spec mapping
+from that one; every entry point emits the same ordered tuple.
 
 
 
